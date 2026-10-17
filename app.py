@@ -3,290 +3,186 @@ import re
 import sqlite3
 from datetime import datetime
 
-from flask import Flask, g, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_DB = os.environ.get("DB_PATH", os.path.join(BASE, "data", "sklad.db"))
 UNITS = ("шт", "кг", "упак")
-TITLE_MAX = 100
-NOTE_MAX = 500
-NAME_MAX = 100
-LAST_OPERATIONS = 20
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS products (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    unit TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS movements (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id INTEGER NOT NULL,
-    kind TEXT NOT NULL,
-    quantity INTEGER NOT NULL,
-    created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    date TEXT NOT NULL,
-    time TEXT NOT NULL DEFAULT '',
-    note TEXT NOT NULL DEFAULT '',
-    done INTEGER NOT NULL DEFAULT 0
-);
-"""
-
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
-DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 
 
 def create_app(db_path=None):
-    app = Flask(
-        __name__,
-        static_folder=os.path.join(BASE_DIR, "static"),
-        static_url_path="/static",
-    )
-    path = db_path or os.environ.get("SKLAD_DB") or os.path.join(BASE_DIR, "data", "sklad.db")
-    folder = os.path.dirname(path)
-    if folder:
-        os.makedirs(folder, exist_ok=True)
-    app.config["DB_PATH"] = path
+    path = db_path or DEFAULT_DB
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    app = Flask(__name__, static_folder=os.path.join(BASE, "static"), static_url_path="/static")
 
-    con = sqlite3.connect(path)
-    con.executescript(SCHEMA)
-    con.commit()
-    con.close()
+    def conn():
+        c = sqlite3.connect(path)
+        c.row_factory = sqlite3.Row
+        return c
 
-    def db():
-        if "db" not in g:
-            g.db = sqlite3.connect(app.config["DB_PATH"])
-            g.db.row_factory = sqlite3.Row
-        return g.db
+    with conn() as c:
+        c.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS products(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+                unit TEXT NOT NULL, qty INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS operations(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+                product_id INTEGER NOT NULL, product TEXT NOT NULL,
+                kind TEXT NOT NULL, qty INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS tasks(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+                date TEXT NOT NULL, time TEXT, note TEXT NOT NULL DEFAULT '',
+                done INTEGER NOT NULL DEFAULT 0);
+            """
+        )
+    c = None
 
-    @app.teardown_appcontext
-    def close_db(_exc):
-        conn = g.pop("db", None)
-        if conn is not None:
-            conn.close()
+    def err(msg, code=400):
+        return jsonify({"error": msg}), code
 
-    @app.after_request
-    def no_cache(resp):
-        resp.headers["Cache-Control"] = "no-store"
-        return resp
+    def body():
+        return request.get_json(silent=True) or {}
 
-    def body_dict():
-        data = request.get_json(silent=True)
-        return data if isinstance(data, dict) else {}
-
-    def fail(message, status=400, **extra):
-        payload = {"error": message}
-        payload.update(extra)
-        return jsonify(payload), status
-
-    # ---------- страница ----------
-    @app.route("/")
+    @app.get("/")
     def index():
         return send_from_directory(app.static_folder, "index.html")
 
     # ---------- склад ----------
-    def products_with_balance():
-        rows = db().execute(
-            "SELECT p.id, p.name, p.unit, "
-            "COALESCE(SUM(CASE WHEN m.kind='in' THEN m.quantity ELSE -m.quantity END), 0) AS balance "
-            "FROM products p LEFT JOIN movements m ON m.product_id = p.id "
-            "GROUP BY p.id ORDER BY p.id"
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    def balance_of(product_id):
-        row = db().execute(
-            "SELECT COALESCE(SUM(CASE WHEN kind='in' THEN quantity ELSE -quantity END), 0) AS b "
-            "FROM movements WHERE product_id=?",
-            (product_id,),
-        ).fetchone()
-        return row["b"]
-
     @app.get("/api/products")
-    def list_products():
-        return jsonify(products_with_balance())
+    def products():
+        with conn() as c:
+            rows = c.execute("SELECT id,name,unit,qty FROM products ORDER BY id").fetchall()
+        return jsonify([dict(r) for r in rows])
 
     @app.post("/api/products")
     def add_product():
-        data = body_dict()
-        name = str(data.get("name") or "").strip()
-        unit = str(data.get("unit") or "").strip()
+        d = body()
+        name = str(d.get("name") or "").strip()
+        unit = d.get("unit")
         if not name:
-            return fail("Введите название товара")
-        if len(name) > NAME_MAX:
-            return fail("Название не длиннее 100 символов")
+            return err("Введите название товара")
+        if len(name) > 100:
+            return err("Название не длиннее 100 символов")
         if unit not in UNITS:
-            return fail("Выберите единицу измерения")
-        for row in db().execute("SELECT name FROM products").fetchall():
-            if row["name"].strip().lower() == name.lower():
-                return fail("Такой товар уже есть")
-        cur = db().execute("INSERT INTO products(name, unit) VALUES (?, ?)", (name, unit))
-        db().commit()
-        return jsonify({"id": cur.lastrowid, "name": name, "unit": unit, "balance": 0}), 201
+            return err("Выберите единицу")
+        with conn() as c:
+            names = [r["name"].lower() for r in c.execute("SELECT name FROM products")]
+            if name.lower() in names:
+                return err("Такой товар уже есть")
+            cur = c.execute("INSERT INTO products(name,unit,qty) VALUES(?,?,0)", (name, unit))
+            pid = cur.lastrowid
+        return jsonify({"id": pid, "name": name, "unit": unit, "qty": 0}), 201
 
-    @app.get("/api/movements")
-    def list_movements():
-        rows = db().execute(
-            "SELECT m.id, m.kind, m.quantity, m.created_at, p.name AS product, p.unit AS unit "
-            "FROM movements m JOIN products p ON p.id = m.product_id "
-            "ORDER BY m.id DESC LIMIT ?",
-            (LAST_OPERATIONS,),
-        ).fetchall()
-        result = []
-        for r in rows:
-            try:
-                when = datetime.strptime(r["created_at"], "%Y-%m-%d %H:%M:%S").strftime("%d.%m.%Y %H:%M")
-            except ValueError:
-                when = r["created_at"]
-            result.append(
-                {
-                    "id": r["id"],
-                    "date": when,
-                    "product": r["product"],
-                    "unit": r["unit"],
-                    "kind": r["kind"],
-                    "quantity": r["quantity"],
-                }
-            )
-        return jsonify(result)
+    @app.get("/api/operations")
+    def operations():
+        with conn() as c:
+            rows = c.execute(
+                "SELECT id,ts,product,kind,qty FROM operations ORDER BY id DESC LIMIT 20"
+            ).fetchall()
+        return jsonify([dict(r) for r in rows])
 
-    @app.post("/api/movements")
-    def add_movement():
-        data = body_dict()
-        kind = data.get("kind")
+    @app.post("/api/operations")
+    def add_operation():
+        d = body()
+        kind = d.get("kind")
+        qs = str(d.get("qty", "")).strip()
         if kind not in ("in", "out"):
-            return fail("Неизвестная операция")
+            return err("Неизвестная операция")
+        if not re.fullmatch(r"\d+", qs) or int(qs) < 1:
+            return err("Введите целое количество от 1")
+        qty = int(qs)
         try:
-            product_id = int(data.get("product_id"))
+            pid = int(d.get("product_id"))
         except (TypeError, ValueError):
-            return fail("Выберите товар")
-        product = db().execute("SELECT id FROM products WHERE id=?", (product_id,)).fetchone()
-        if product is None:
-            return fail("Товар не найден", 404)
-        raw = data.get("quantity")
-        qty = None
-        if isinstance(raw, bool):
-            qty = None
-        elif isinstance(raw, int):
-            qty = raw
-        elif isinstance(raw, str) and re.fullmatch(r"\s*\d+\s*", raw):
-            qty = int(raw)
-        if qty is None or qty < 1:
-            return fail("Введите целое число от 1")
-        if kind == "out" and qty > balance_of(product_id):
-            return fail("Недостаточно на складе")
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        db().execute(
-            "INSERT INTO movements(product_id, kind, quantity, created_at) VALUES (?, ?, ?, ?)",
-            (product_id, kind, qty, now),
-        )
-        db().commit()
-        return jsonify({"ok": True}), 201
+            return err("Выберите товар")
+        with conn() as c:
+            p = c.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
+            if not p:
+                return err("Выберите товар")
+            if kind == "out" and qty > p["qty"]:
+                return err("Недостаточно на складе")
+            new = p["qty"] + qty if kind == "in" else p["qty"] - qty
+            c.execute("UPDATE products SET qty=? WHERE id=?", (new, pid))
+            c.execute(
+                "INSERT INTO operations(ts,product_id,product,kind,qty) VALUES(?,?,?,?,?)",
+                (datetime.now().strftime("%d.%m.%Y %H:%M"), pid, p["name"], kind, qty),
+            )
+        return jsonify({"id": pid, "qty": new}), 201
 
-    # ---------- календарь ----------
-    def task_dict(row):
-        return {
-            "id": row["id"],
-            "title": row["title"],
-            "date": row["date"],
-            "time": row["time"],
-            "note": row["note"],
-            "done": bool(row["done"]),
-        }
+    # ---------- задачи ----------
+    def task_dict(r):
+        return {"id": r["id"], "title": r["title"], "date": r["date"],
+                "time": r["time"] or "", "note": r["note"], "done": bool(r["done"])}
 
-    def validate_task(data):
-        errors = {}
-        title = str(data.get("title") or "").strip()
-        date = str(data.get("date") or "").strip()
-        time = str(data.get("time") or "").strip()
-        note = str(data.get("note") or "").strip()
+    def validate(d):
+        title = str(d.get("title") or "").strip()
+        date = str(d.get("date") or "").strip()
+        time = str(d.get("time") or "").strip()
+        note = str(d.get("note") or "").strip()
         if not title:
-            errors["title"] = "Введите название задачи"
-        elif len(title) > TITLE_MAX:
-            errors["title"] = "Название не длиннее 100 символов"
-        if not date:
-            errors["date"] = "Укажите дату"
-        else:
-            ok = bool(DATE_RE.match(date))
-            if ok:
-                try:
-                    datetime.strptime(date, "%Y-%m-%d")
-                except ValueError:
-                    ok = False
-            if not ok:
-                errors["date"] = "Укажите корректную дату"
+            return None, "Введите название задачи"
+        if len(title) > 100:
+            return None, "Название не длиннее 100 символов"
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+                raise ValueError
+        except ValueError:
+            return None, "Укажите дату"
         if time and not TIME_RE.match(time):
-            errors["time"] = "Время в формате ЧЧ:ММ"
-        if len(note) > NOTE_MAX:
-            errors["note"] = "Заметка не длиннее 500 символов"
-        return errors, {"title": title, "date": date, "time": time, "note": note}
+            return None, "Время в формате ЧЧ:ММ"
+        if len(note) > 500:
+            return None, "Заметка не длиннее 500 символов"
+        return {"title": title, "date": date, "time": time or None, "note": note}, None
 
     @app.get("/api/tasks")
-    def list_tasks():
-        month = request.args.get("month", "")
-        sql = "SELECT * FROM tasks"
-        params = ()
-        if month:
-            if not MONTH_RE.match(month):
-                return fail("Неверный месяц")
-            sql += " WHERE substr(date, 1, 7) = ?"
-            params = (month,)
-        sql += " ORDER BY date, time, id"
-        rows = db().execute(sql, params).fetchall()
+    def tasks():
+        with conn() as c:
+            rows = c.execute("SELECT * FROM tasks ORDER BY date, COALESCE(time,''), id").fetchall()
         return jsonify([task_dict(r) for r in rows])
 
     @app.post("/api/tasks")
     def add_task():
-        errors, clean = validate_task(body_dict())
-        if errors:
-            return fail(next(iter(errors.values())), errors=errors)
-        cur = db().execute(
-            "INSERT INTO tasks(title, date, time, note, done) VALUES (?, ?, ?, ?, 0)",
-            (clean["title"], clean["date"], clean["time"], clean["note"]),
-        )
-        db().commit()
-        row = db().execute("SELECT * FROM tasks WHERE id=?", (cur.lastrowid,)).fetchone()
-        return jsonify(task_dict(row)), 201
+        v, e = validate(body())
+        if e:
+            return err(e)
+        with conn() as c:
+            cur = c.execute(
+                "INSERT INTO tasks(title,date,time,note,done) VALUES(?,?,?,?,0)",
+                (v["title"], v["date"], v["time"], v["note"]),
+            )
+            r = c.execute("SELECT * FROM tasks WHERE id=?", (cur.lastrowid,)).fetchone()
+        return jsonify(task_dict(r)), 201
 
-    @app.put("/api/tasks/<int:task_id>")
-    def update_task(task_id):
-        row = db().execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if row is None:
-            return fail("Задача не найдена", 404)
-        errors, clean = validate_task(body_dict())
-        if errors:
-            return fail(next(iter(errors.values())), errors=errors)
-        db().execute(
-            "UPDATE tasks SET title=?, date=?, time=?, note=? WHERE id=?",
-            (clean["title"], clean["date"], clean["time"], clean["note"], task_id),
-        )
-        db().commit()
-        row = db().execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        return jsonify(task_dict(row))
+    @app.put("/api/tasks/<int:tid>")
+    def edit_task(tid):
+        v, e = validate(body())
+        if e:
+            return err(e)
+        with conn() as c:
+            if not c.execute("SELECT 1 FROM tasks WHERE id=?", (tid,)).fetchone():
+                return err("Задача не найдена", 404)
+            c.execute("UPDATE tasks SET title=?,date=?,time=?,note=? WHERE id=?",
+                      (v["title"], v["date"], v["time"], v["note"], tid))
+            r = c.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+        return jsonify(task_dict(r))
 
-    @app.patch("/api/tasks/<int:task_id>")
-    def patch_task(task_id):
-        row = db().execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if row is None:
-            return fail("Задача не найдена", 404)
-        data = body_dict()
-        if "done" not in data:
-            return fail("Не указано состояние")
-        db().execute("UPDATE tasks SET done=? WHERE id=?", (1 if data["done"] else 0, task_id))
-        db().commit()
-        row = db().execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        return jsonify(task_dict(row))
+    @app.patch("/api/tasks/<int:tid>")
+    def done_task(tid):
+        done = 1 if body().get("done") else 0
+        with conn() as c:
+            if not c.execute("SELECT 1 FROM tasks WHERE id=?", (tid,)).fetchone():
+                return err("Задача не найдена", 404)
+            c.execute("UPDATE tasks SET done=? WHERE id=?", (done, tid))
+            r = c.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+        return jsonify(task_dict(r))
 
-    @app.delete("/api/tasks/<int:task_id>")
-    def delete_task(task_id):
-        cur = db().execute("DELETE FROM tasks WHERE id=?", (task_id,))
-        db().commit()
-        if cur.rowcount == 0:
-            return fail("Задача не найдена", 404)
+    @app.delete("/api/tasks/<int:tid>")
+    def del_task(tid):
+        with conn() as c:
+            c.execute("DELETE FROM tasks WHERE id=?", (tid,))
         return jsonify({"ok": True})
 
     return app
@@ -295,4 +191,4 @@ def create_app(db_path=None):
 app = create_app()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, threaded=True)
+    app.run(host="0.0.0.0", port=8080)

@@ -7,138 +7,81 @@
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header class="top">
-  <div class="brand">
-    <h1>Склад</h1>
-    <span class="sub">Программа кладовщика</span>
-  </div>
-  <nav class="tabs" role="tablist" aria-label="Разделы">
-    <button type="button" role="tab" id="tab-stock" class="tab active" aria-selected="true" data-view="stock">Склад</button>
-    <button type="button" role="tab" id="tab-calendar" class="tab" aria-selected="false" data-view="calendar">Календарь</button>
+<header>
+  <b class="logo">Склад</b><span class="sub">Программа кладовщика</span>
+  <nav>
+    <button type="button" id="tab-stock" class="on">Склад</button>
+    <button type="button" id="tab-cal">Календарь</button>
   </nav>
 </header>
-
 <main>
-  <!-- ===== Склад ===== -->
-  <section id="view-stock" aria-label="Склад">
-    <div class="card">
-      <h2>Новый товар</h2>
-      <form id="product-form" class="row" novalidate>
-        <div class="f grow">
-          <label for="product-name">Название</label>
-          <input type="text" id="product-name" placeholder="Например, Гвозди" autocomplete="off">
-        </div>
-        <div class="f">
-          <label for="product-unit">Единица</label>
-          <select id="product-unit">
-            <option value="шт">шт</option>
-            <option value="кг">кг</option>
-            <option value="упак">упак</option>
-          </select>
-        </div>
-        <button type="submit" class="btn primary">Добавить</button>
-      </form>
-      <div class="hint">Остаток нового товара — 0, пока не будет прихода.</div>
-      <div class="error" id="product-error" role="alert"></div>
+<section id="sec-stock">
+  <div class="card">
+    <h2>Новый товар</h2>
+    <div class="row">
+      <div class="f grow"><label for="p-name">Название</label><input type="text" id="p-name" placeholder="Например, Гвозди"></div>
+      <div class="f"><label for="p-unit">Единица</label><select id="p-unit"><option>шт</option><option>кг</option><option>упак</option></select></div>
+      <button type="button" class="btn" id="p-add">Добавить</button>
     </div>
-
-    <div class="card">
-      <h2>Остатки товаров</h2>
-      <table class="tbl">
-        <thead><tr><th>Товар</th><th>Единица</th><th class="r">Остаток</th></tr></thead>
-        <tbody id="stock-body"></tbody>
-      </table>
+    <p class="error" id="p-error"></p>
+    <p class="hint">Остаток нового товара — 0, пока не будет прихода.</p>
+  </div>
+  <div class="card">
+    <h2>Остатки товаров</h2>
+    <table><thead><tr><th>Товар</th><th>Единица</th><th class="r">Остаток</th></tr></thead><tbody id="stock-body"></tbody></table>
+    <p class="empty" id="stock-empty">Товаров пока нет. Добавьте первый товар в форме выше.</p>
+  </div>
+  <div class="card">
+    <h2>Приход / расход</h2>
+    <div class="row">
+      <div class="f grow"><label for="o-product">Товар</label><select id="o-product"></select></div>
+      <div class="f"><label for="o-qty">Количество</label><input type="text" id="o-qty" placeholder="целое число от 1"></div>
+      <button type="button" class="btn in" id="o-in">Приход</button>
+      <button type="button" class="btn out" id="o-out">Расход</button>
     </div>
+    <p class="error" id="o-error"></p>
+  </div>
+  <div class="card">
+    <h2>Последние операции</h2>
+    <table><thead><tr><th>Дата</th><th>Товар</th><th>Операция</th><th class="r">Количество</th></tr></thead><tbody id="ops-body"></tbody></table>
+    <p class="empty" id="ops-empty">Операций пока не было.</p>
+    <p class="hint" id="ops-hint" hidden>Показаны последние 20 операций, новые сверху.</p>
+  </div>
+</section>
 
-    <div class="card">
-      <h2>Приход / расход</h2>
-      <div class="row">
-        <div class="f grow">
-          <label for="move-product">Товар</label>
-          <select id="move-product"></select>
-        </div>
-        <div class="f">
-          <label for="move-qty">Количество</label>
-          <input type="text" id="move-qty" inputmode="numeric" placeholder="целое число от 1" autocomplete="off">
-        </div>
-        <button type="button" id="btn-in" class="btn in">Приход</button>
-        <button type="button" id="btn-out" class="btn out">Расход</button>
-      </div>
-      <div class="error" id="move-error" role="alert"></div>
+<section id="sec-cal" hidden>
+  <div class="card">
+    <div class="head">
+      <h2 id="cal-title"></h2>
+      <button type="button" class="btn sec" id="cal-prev">Предыдущий месяц</button>
+      <button type="button" class="btn sec" id="cal-today">Сегодня</button>
+      <button type="button" class="btn sec" id="cal-next">Следующий месяц</button>
     </div>
-
-    <div class="card">
-      <h2>Последние операции</h2>
-      <table class="tbl">
-        <thead><tr><th>Дата</th><th>Товар</th><th>Операция</th><th class="r">Количество</th></tr></thead>
-        <tbody id="ops-body"></tbody>
-      </table>
-      <div class="hint" id="ops-hint" hidden>Показаны последние 20 операций, новые сверху.</div>
+    <div class="dow"><span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span></div>
+    <div class="grid" id="cal-grid"></div>
+  </div>
+  <div class="card">
+    <h2 id="day-title">Задачи на день</h2>
+    <div id="day-list"></div>
+  </div>
+  <div class="card form" id="task-card">
+    <h2 id="form-title">Новая задача</h2>
+    <div class="row">
+      <div class="f grow"><label for="f-title">Название</label><input type="text" id="f-title" placeholder="Например, Принять поставку"></div>
     </div>
-  </section>
-
-  <!-- ===== Календарь ===== -->
-  <section id="view-calendar" aria-label="Календарь" hidden>
-    <div class="card">
-      <div class="cal-head">
-        <h2 id="month-title"></h2>
-        <div class="cal-nav">
-          <button type="button" class="btn sec" id="btn-prev">Предыдущий месяц</button>
-          <button type="button" class="btn sec" id="btn-today">Сегодня</button>
-          <button type="button" class="btn sec" id="btn-next">Следующий месяц</button>
-        </div>
-      </div>
-      <div class="dow"><span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span></div>
-      <div class="grid" id="cal-grid"></div>
-      <div class="legend">
-        <span><i class="lg-task"></i>Задача</span>
-        <span><i class="lg-done"></i>Выполнена</span>
-        <span><i class="lg-late"></i>Просрочена</span>
-      </div>
+    <div class="row">
+      <div class="f"><label for="f-date">Дата</label><input type="date" id="f-date"></div>
+      <div class="f"><label for="f-time">Время</label><input type="time" id="f-time"></div>
+      <div class="f grow"><label for="f-note">Заметка</label><input type="text" id="f-note"></div>
     </div>
-
-    <div class="two">
-      <div class="card">
-        <h2 id="day-title">Задачи на день</h2>
-        <ul class="tasks" id="day-list"></ul>
-        <p class="empty-text" id="day-empty"></p>
-      </div>
-
-      <div class="card form-card" id="task-card">
-        <h2 id="form-title">Новая задача</h2>
-        <form id="task-form" novalidate>
-          <div class="f">
-            <label for="task-title">Название</label>
-            <input type="text" id="task-title" autocomplete="off" placeholder="Например, Принять поставку гвоздей">
-            <div class="error" id="err-title" role="alert"></div>
-          </div>
-          <div class="row2">
-            <div class="f">
-              <label for="task-date">Дата</label>
-              <input type="date" id="task-date">
-              <div class="error" id="err-date" role="alert"></div>
-            </div>
-            <div class="f">
-              <label for="task-time">Время</label>
-              <input type="time" id="task-time">
-              <div class="error" id="err-time" role="alert"></div>
-            </div>
-          </div>
-          <div class="f">
-            <label for="task-note">Заметка</label>
-            <input type="text" id="task-note" autocomplete="off" placeholder="Например, ворота №2">
-            <div class="error" id="err-note" role="alert"></div>
-          </div>
-          <div class="actions">
-            <button type="submit" class="btn primary" id="task-submit">Добавить задачу</button>
-            <button type="button" class="btn sec" id="task-cancel" hidden>Отмена</button>
-          </div>
-        </form>
-      </div>
+    <p class="error" id="f-error"></p>
+    <div class="row">
+      <button type="button" class="btn" id="f-submit">Добавить задачу</button>
+      <button type="button" class="btn sec" id="f-cancel" hidden>Отмена</button>
     </div>
-  </section>
+  </div>
+</section>
 </main>
-
 <script src="/static/app.js"></script>
 </body>
 </html>
